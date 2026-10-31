@@ -1438,14 +1438,45 @@
         }
       }
 
+      // Teks tagihan dari link (?pesan=...) diambil lalu dihapus dari alamat,
+      // supaya tidak terisi ulang saat halaman dimuat ulang.
+      function readPresetMessage() {
+        const params = new URLSearchParams(window.location.search);
+        const text = (params.get('pesan') || '').trim();
+        if (!text) return '';
+        params.delete('pesan');
+        const rest = params.toString();
+        try {
+          window.history.replaceState(null, '', window.location.pathname + (rest ? '?' + rest : '') + window.location.hash);
+        } catch (err) { /* alamat tidak bisa diubah: tidak masalah */ }
+        return text;
+      }
+
+      // Nama dan Gmail dari teks tagihan (baris "*Nama:*" dan "*Gmail:*").
+      function parseBuyerInfo(text) {
+        const nama = /nama\s*:\s*\*?\s*([^*\n]+)/i.exec(text);
+        const email = /gmail\s*:\s*\*?\s*([^\s*]+@[^\s*]+)/i.exec(text);
+        return {
+          nama: nama ? nama[1].trim().slice(0, 40) : '',
+          email: email ? email[1].trim().slice(0, 80) : '',
+        };
+      }
+
       function startBuyer() {
         buyer.id = readLocal('kujr_buyer_id') || makeId();
         saveLocal('kujr_buyer_id', buyer.id);
         buyerEl.name.value = readLocal('kujr_buyer_name');
         buyerEl.email.value = readLocal('kujr_buyer_email');
-        // Teks dari link, misalnya chat.html?pesan=...: hanya diisi, tidak dikirim otomatis
-        const preset = new URLSearchParams(window.location.search).get('pesan');
-        if (preset) buyerEl.input.value = preset.slice(0, 1000);
+        // Dari tombol Konfirmasi di halaman pembelian (chat.html?pesan=...): nama, Gmail, dan teks tagihan langsung terisi.
+        // Teks hanya masuk ke kolom pesan; pembeli tetap menekan kirim sendiri.
+        const preset = readPresetMessage();
+        if (preset) {
+          const info = parseBuyerInfo(preset);
+          if (info.nama) buyerEl.name.value = info.nama;
+          if (info.email) buyerEl.email.value = info.email;
+          persistBuyer();
+          buyerEl.input.value = preset.slice(0, 1000);
+        }
 
         buyerEl.adminName.textContent = CONFIG.adminName;
         document.title = 'Chat ' + CONFIG.adminName;
