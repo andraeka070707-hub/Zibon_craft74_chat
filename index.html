@@ -547,6 +547,26 @@
       font-size: 13.5px;
       cursor: pointer;
     }
+    /* ---------- Tombol unduh dari balasan otomatis ---------- */
+    .btn-unduh { display: block; margin-top: 8px; padding: 9px 12px; border-radius: 16px; background: #075e54; color: #fff; text-align: center; font-weight: 700; text-decoration: none; }
+    #buyerApp[hidden] { display: none !important; }
+    /* ---------- Panel admin ---------- */
+    .adm { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; background: #efeae2; font-size: 15px; }
+    .adm-head { display: flex; justify-content: space-between; gap: 8px; padding: 12px 16px; background: #075e54; color: #fff; font-weight: 700; }
+    .adm-list { max-height: 34vh; overflow: auto; background: #fff; border-bottom: 1px solid #d1d7db; }
+    .adm-item { padding: 10px 14px; border-bottom: 1px solid #eef1f3; cursor: pointer; }
+    .adm-item.on { background: #f0f2f5; }
+    .adm-item strong, .adm-item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .adm-item small { color: #667781; }
+    .adm-chat { flex: 1; overflow: auto; padding: 12px; }
+    .adm-form { display: flex; gap: 8px; padding: 8px; background: #f0f2f5; }
+    .adm-form input { flex: 1; min-width: 0; padding: 10px 14px; border: 1px solid #d1d7db; border-radius: 18px; font: inherit; }
+    .adm-form button { padding: 10px 16px; border: 0; border-radius: 18px; background: #075e54; color: #fff; font: inherit; font-weight: 700; cursor: pointer; }
+    .aksi-admin { display: flex; gap: 8px; margin-top: 8px; }
+    .aksi-admin button { flex: 1; border: 0; border-radius: 16px; padding: 8px 6px; color: #fff; font: inherit; font-size: 13.5px; font-weight: 700; cursor: pointer; }
+    .aksi-admin .lanjut { background: #15803d; }
+    .aksi-admin .tolak { background: #b91c1c; }
+    .status-admin { margin-top: 8px; font-size: 13px; color: #667781; }
   </style>
 </head>
 <body>
@@ -640,6 +660,11 @@
           tidakTerbaca: 'Maaf, tanggal, jam, atau nominal pada gambar tidak terbaca. Mohon kirim ulang screenshot bukti transaksi yang jelas.',
           sukses: 'Selamat! 🎉 Pembayaran Anda sudah kami terima. Terima kasih sudah membeli addon KUJR. Silakan unduh addonnya lewat tombol di bawah ini.',
           fileDiterima: 'Terima kasih, file Anda sudah kami terima. Admin akan segera memeriksanya ya 🙏',
+          buktiDiterima: 'Bukti transaksi Anda telah diterima! Mohon tunggu sebentar, Admin sedang memverifikasi uang masuk di DANA.',
+          lanjut: 'Pembayaran dikonfirmasi! Silakan masukkan ulang kode OTP di bawah ini untuk mengambil addon:\nCode otp: {OTP}',
+          tolak: 'Maaf, transaksi Anda tidak valid atau saldo DANA belum masuk. Silakan hubungi Admin jika ada kendala.',
+          otpBenar: 'Kode OTP benar! Terima kasih sudah membeli addon KUJR. Silakan unduh addonnya lewat tombol di bawah.',
+          otpSalah: 'Kode OTP belum cocok. Pastikan mengetik kode OTP yang dikirim Admin.',
         },
       };
 
@@ -654,6 +679,7 @@
       const COMPRESS_MAX_SIDE = 1600;
       const STICK_PX = 60;
       const JSONP_TIMEOUT_MS = 15000;
+      const ADMIN_MODE = new URLSearchParams(window.location.search).get('mode') === 'admin';
       const IMAGE_EXT_RE = /\.(jpe?g|png|gif|webp|bmp|heic|heif)$/i;
       const BULAN = {
         jan: 1, feb: 2, mar: 3, apr: 4, mei: 5, may: 5, jun: 6, jul: 7, agu: 8, agt: 8, aug: 8, ags: 8,
@@ -1074,6 +1100,7 @@
         const cid = makeId();
         buyer.seen.add(cid);
         const bubble = addBubble(buyerEl.chat, 'out', { cid, text: o.text, tick: 'pending' });
+        simpanPesan(buyer.id, { cid, arah: 'pembeli', teks: o.text, waktu: new Date().toISOString() });
 
         if (CONFIG.notifyUrl) {
           postJSON({
@@ -1089,111 +1116,6 @@
         }
 
         addDanaCard(buyerEl.chat, { total: o.total, invoice: o.invoice });
-      }
-
-      /* =====================================================================
-         PEMERIKSAAN BUKTI TRANSAKSI (OCR di browser)
-         ===================================================================== */
-      function loadOcr() {
-        if (window.Tesseract) return Promise.resolve();
-        if (!ocrLoading) {
-          ocrLoading = new Promise((resolve, reject) => {
-            const s = document.createElement('script');
-            s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-            s.onload = () => resolve();
-            s.onerror = () => { ocrLoading = null; reject(new Error('OCR gagal dimuat')); };
-            document.head.appendChild(s);
-          });
-        }
-        return ocrLoading;
-      }
-
-      async function readText(file) {
-        await loadOcr();
-        const result = await window.Tesseract.recognize(file, CONFIG.ocrLang);
-        return (result && result.data && result.data.text) || '';
-      }
-
-      function wibTs(y, mo, d, h, mi) {
-        if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59) return null;
-        return Date.UTC(y, mo - 1, d, h, mi) - WIB_OFFSET;
-      }
-
-      // Mencari tanggal + jam transaksi dan nominal dari teks hasil OCR
-      function parseReceipt(raw) {
-        const text = String(raw || '');
-        let ts = null;
-
-        // contoh: "02 Nov 2026 • 21:54"
-        let m = /(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})\D{0,6}?(\d{1,2})[:.](\d{2})/.exec(text);
-        if (m) ts = wibTs(+m[3], BULAN[m[2].slice(0, 3).toLowerCase()] || 0, +m[1], +m[4], +m[5]);
-
-        // contoh: "02/11/2026 21:54"
-        if (ts === null) {
-          m = /(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})\D{0,6}?(\d{1,2})[:.](\d{2})/.exec(text);
-          if (m) ts = wibTs(+m[3], +m[2], +m[1], +m[4], +m[5]);
-        }
-
-        // contoh: "2026-11-02 21:54"
-        if (ts === null) {
-          m = /(\d{4})-(\d{2})-(\d{2})\D{0,6}?(\d{1,2})[:.](\d{2})/.exec(text);
-          if (m) ts = wibTs(+m[1], +m[2], +m[3], +m[4], +m[5]);
-        }
-
-        // Nominal: "Rp" pertama setelah "Total Bayar", jika tidak ada pakai "Rp" pertama di gambar
-        let amount = null;
-        const at = text.search(/total\s*bayar/i);
-        const scope = at !== -1 ? text.slice(at, at + 160) : text;
-        const rp = /Rp\.?\s?([0-9][0-9.,]*)/i.exec(scope);
-        if (rp) amount = toAmount(rp[1]);
-
-        return { ts, amount };
-      }
-
-      const dayOf = (ts) => DAY_FORMAT.format(new Date(ts)); // tanggal Asia/Jakarta: "YYYY-MM-DD"
-
-      // Nominal minimal bukti: total tagihan (cekDenganTotal: true) atau harga addon saja (false)
-      function minimalBayar(order) {
-        const total = (order && order.total) || 0;
-        const harga = (order && order.harga) || 0;
-        if (CONFIG.cekDenganTotal) return total || harga || CONFIG.hargaDefault;
-        return harga || total || CONFIG.hargaDefault;
-      }
-
-      // Urutan pengecekan: tanggal & batas waktu dulu, baru nominal.
-      function verdictOf(info, order) {
-        if (!info.ts || !info.amount) return 'tidakTerbaca';
-
-        const now = Date.now();
-        if (info.ts > now + 10 * MIN) return 'tidakTerbaca';       // jam di masa depan: salah baca
-        if (dayOf(info.ts) !== dayOf(now)) return 'kadaluarsa';    // bukan hari ini
-        if (now - info.ts > CONFIG.batasJam * HOUR) return 'kadaluarsa';
-
-        if (info.amount < minimalBayar(order)) return 'kurang';
-        return 'ok';
-      }
-
-      async function checkProof(file) {
-        const waiting = addBubble(buyerEl.chat, 'in', { text: CONFIG.msg.memeriksa });
-
-        let verdict;
-        try {
-          const text = await readText(file);
-          verdict = verdictOf(parseReceipt(text), state.order);
-        } catch (err) {
-          verdict = 'tidakTerbaca';
-        }
-
-        waiting.parentElement.remove();
-
-        if (verdict === 'ok') {
-          addBubble(buyerEl.chat, 'in', {
-            text: CONFIG.msg.sukses,
-            link: { url: CONFIG.mediafireUrl, label: '⬇ Unduh addon KUJR' },
-          });
-        } else {
-          addBubble(buyerEl.chat, 'in', { text: CONFIG.msg[verdict] });
-        }
       }
 
       /* =====================================================================
@@ -1314,6 +1236,7 @@
       // Mengirim lampiran ke admin, lalu (untuk gambar) memeriksa isi bukti
       async function handleUpload(file) {
         const isImage = isImageFile(file);
+        let previewData = '';
         if (!isImage && file.size > MAX_FILE_BYTES) {
           showToast('File terlalu besar. Maksimal ' + CONFIG.maxFileMB + ' MB.', 3500);
           return;
@@ -1329,6 +1252,7 @@
 
         try {
           const dataUrl = await fileToDataUrl(file, isImage);
+          previewData = isImage ? dataUrl : '';
           const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
           const bytes = Math.floor(base64.length * 3 / 4);
           if (bytes > MAX_FILE_BYTES) throw new Error('terlalu besar');
@@ -1360,8 +1284,9 @@
           return;
         }
 
-        if (isImage) await checkProof(file); // OCR memakai file asli, bukan hasil kompresi
-        else addBubble(buyerEl.chat, 'in', { text: CONFIG.msg.fileDiterima });
+        // Tidak ada pemeriksaan otomatis: admin memverifikasi bukti di panel admin
+        simpanPesan(buyer.id, { cid, arah: 'pembeli', fileNama: file.name, fileKB: Math.round(file.size / 1024), previewUrl: previewData, waktu: new Date().toISOString() });
+        botKirim(isImage ? CONFIG.msg.buktiDiterima : CONFIG.msg.fileDiterima);
       }
 
       /* =====================================================================
@@ -1396,6 +1321,7 @@
         const cid = makeId();
         buyer.seen.add(cid);
         const bubble = addBubble(buyerEl.chat, 'out', { cid, text, tick: 'pending' });
+        simpanPesan(buyer.id, { cid, arah: 'pembeli', teks: text, waktu: new Date().toISOString() });
 
         if (CONFIG.notifyUrl) {
           postJSON({
@@ -1412,12 +1338,262 @@
 
         const proof = parseProof(text);
         if (proof) addDanaCard(buyerEl.chat, proof);
+        if (/^\d{5}$/.test(text)) {
+          const benar = text === otpHariIni();
+          botKirim(benar ? CONFIG.msg.otpBenar : CONFIG.msg.otpSalah, benar ? { url: CONFIG.mediafireUrl, label: '⬇ Unduh addon KUJR' } : null);
+        }
         buyerEl.input.focus();
       }
 
       /* =====================================================================
          START
          ===================================================================== */
+      /* =====================================================================
+         PENYIMPANAN BERSAMA (localStorage): pesan pembeli, balasan bot, dan
+         keputusan admin. Dipakai mode pembeli dan mode admin di browser ini.
+         ===================================================================== */
+      const STORE_KEY = 'kujr_store_v1';
+
+      function storeBaca() {
+        try { return JSON.parse(localStorage.getItem(STORE_KEY)) || { threads: {} }; }
+        catch (err) { return { threads: {} }; }
+      }
+
+      function storeTulis(data) {
+        try { localStorage.setItem(STORE_KEY, JSON.stringify(data)); }
+        catch (err) { showToast('Penyimpanan browser penuh. Bukti foto berikutnya mungkin tidak tersimpan.', 4500); }
+      }
+
+      function simpanPesan(threadId, msg) {
+        const data = storeBaca();
+        const t = data.threads[threadId] || (data.threads[threadId] = { id: threadId, msgs: [] });
+        if (msg.arah === 'pembeli') {
+          t.nama = buyerEl.name.value.trim() || t.nama || 'Pembeli';
+          t.email = buyerEl.email.value.trim() || t.email || '';
+        }
+        t.msgs.push(msg);
+        t.updated = Date.now();
+        storeTulis(data);
+      }
+
+      function ubahPesan(threadId, cid, patch) {
+        const data = storeBaca();
+        const t = data.threads[threadId];
+        const m = t && t.msgs.find((x) => x.cid === cid);
+        if (m) { Object.assign(m, patch); storeTulis(data); }
+      }
+
+      /* =====================================================================
+         KODE OTP HARIAN: 5 digit, berganti setiap hari (WIB). Dihitung berurutan
+         dari OTP_START, sehingga kode hari ini selalu beda dari kemarin dan besok.
+         ===================================================================== */
+      const OTP_SEED = 'kujr-otp-v1';
+      const OTP_START = Math.floor((Date.UTC(2026, 0, 1) + WIB_OFFSET) / (24 * HOUR));
+
+      function hariWib(ms) { return Math.floor((ms + WIB_OFFSET) / (24 * HOUR)); }
+
+      function otpMix(n) {
+        let x = n >>> 0;
+        for (const ch of OTP_SEED) x = Math.imul(x ^ ch.charCodeAt(0), 0x85ebca6b) >>> 0;
+        x ^= x >>> 13;
+        x = Math.imul(x, 0xc2b2ae35) >>> 0;
+        x ^= x >>> 16;
+        return x >>> 0;
+      }
+
+      function otpUntukHari(n) {
+        let prev = -1;
+        let kode = 0;
+        for (let d = OTP_START; d <= n; d++) {
+          kode = otpMix(d) % 100000;
+          if (kode === prev) kode = (kode + 1) % 100000;
+          prev = kode;
+        }
+        return String(kode).padStart(5, '0');
+      }
+
+      function otpHariIni() { return otpUntukHari(hariWib(Date.now())); }
+
+      /* ---------- Balasan bot & admin di layar pembeli ---------- */
+      function tampilBalasan(m) {
+        const opt = { cid: m.cid, file: null, time: m.waktu };
+        if (m.teks) opt.text = m.teks;
+        const bubble = addBubble(buyerEl.chat, 'in', opt);
+        if (m.link) {
+          const a = document.createElement('a');
+          a.className = 'btn-unduh';
+          a.href = m.link.url;
+          a.target = '_blank';
+          a.rel = 'noopener';
+          a.textContent = m.link.label;
+          bubble.insertBefore(a, bubble.querySelector('.meta'));
+        }
+        markSentAsRead(buyerEl.chat);
+      }
+
+      function botKirim(teks, link) {
+        const m = { cid: makeId(), arah: 'bot', teks, link: link || null, waktu: new Date().toISOString() };
+        buyer.seen.add(m.cid);
+        simpanPesan(buyer.id, m);
+        tampilBalasan(m);
+      }
+
+      function syncPembeli() {
+        const t = storeBaca().threads[buyer.id];
+        if (!t) return;
+        t.msgs.forEach((m) => {
+          if (m.arah === 'pembeli' || buyer.seen.has(m.cid)) return;
+          buyer.seen.add(m.cid);
+          tampilBalasan(m);
+        });
+      }
+
+      /* =====================================================================
+         PANEL ADMIN (buka dengan ?mode=admin di browser yang sama)
+         ===================================================================== */
+      const adm = { current: null, counts: null, sig: '', audio: null };
+
+      function bunyi() {
+        try {
+          adm.audio = adm.audio || new (window.AudioContext || window.webkitAudioContext)();
+          [0, 0.25].forEach((t) => {
+            const osc = adm.audio.createOscillator();
+            const gain = adm.audio.createGain();
+            osc.frequency.value = 880;
+            gain.gain.value = 0.15;
+            osc.connect(gain);
+            gain.connect(adm.audio.destination);
+            osc.start(adm.audio.currentTime + t);
+            osc.stop(adm.audio.currentTime + t + 0.18);
+          });
+        } catch (err) { /* browser tanpa suara: notifikasi teks tetap tampil */ }
+      }
+
+      function putuskan(threadId, cid, lanjut) {
+        const teks = lanjut ? CONFIG.msg.lanjut.replace('{OTP}', otpHariIni()) : CONFIG.msg.tolak;
+        simpanPesan(threadId, { cid: makeId(), arah: 'admin', teks, waktu: new Date().toISOString() });
+        ubahPesan(threadId, cid, { keputusan: lanjut ? 'lanjut' : 'tolak' });
+        adm.sig = '';
+        admRefresh();
+      }
+
+      function renderThread(t) {
+        const chatEl = $('admChat');
+        chatEl.textContent = '';
+        if (!t) return;
+        t.msgs.forEach((m) => {
+          if (m.arah === 'admin') {
+            addBubble(chatEl, 'out', { cid: m.cid, text: m.teks, time: m.waktu });
+            return;
+          }
+          const opt = { cid: m.cid, time: m.waktu };
+          if (m.teks) opt.text = m.teks;
+          if (m.fileNama) opt.file = { name: m.fileNama, sizeKB: m.fileKB || 0, previewUrl: m.previewUrl || '' };
+          const bubble = addBubble(chatEl, 'in', opt);
+          if (m.arah === 'pembeli' && m.previewUrl) {
+            const aksi = document.createElement('div');
+            if (m.keputusan) {
+              aksi.className = 'status-admin';
+              aksi.textContent = m.keputusan === 'lanjut' ? '✅ Dilanjutkan, kode OTP sudah dikirim' : '⛔ Ditolak';
+            } else {
+              aksi.className = 'aksi-admin';
+              const ya = document.createElement('button');
+              ya.type = 'button';
+              ya.className = 'lanjut';
+              ya.textContent = '🟢 Lanjutkan';
+              ya.addEventListener('click', () => putuskan(t.id, m.cid, true));
+              const tidak = document.createElement('button');
+              tidak.type = 'button';
+              tidak.className = 'tolak';
+              tidak.textContent = '🔴 Jangan Lanjutkan';
+              tidak.addEventListener('click', () => putuskan(t.id, m.cid, false));
+              aksi.append(ya, tidak);
+            }
+            bubble.insertBefore(aksi, bubble.querySelector('.meta'));
+          }
+        });
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }
+
+      function admRefresh() {
+        const data = storeBaca();
+        const threads = Object.values(data.threads).sort((a, b) => (b.updated || 0) - (a.updated || 0));
+
+        // Notifikasi: ada pesan atau bukti baru dari pembeli
+        const counts = {};
+        let adaBaru = false;
+        threads.forEach((t) => {
+          const n = t.msgs.filter((m) => m.arah === 'pembeli').length;
+          counts[t.id] = n;
+          if (adm.counts && n > (adm.counts[t.id] || 0)) adaBaru = true;
+        });
+        if (adaBaru) { bunyi(); showToast('Ada pesan atau bukti baru dari pembeli.', 3500); }
+        adm.counts = counts;
+
+        if (!adm.current && threads.length) {
+          adm.current = threads[0].id;
+          $('admForm').hidden = false;
+        }
+
+        // Daftar pembeli
+        const listEl = $('admList');
+        listEl.textContent = '';
+        threads.forEach((t) => {
+          const last = t.msgs[t.msgs.length - 1] || {};
+          const item = document.createElement('div');
+          item.className = 'adm-item' + (t.id === adm.current ? ' on' : '');
+          const judul = document.createElement('strong');
+          judul.textContent = t.nama || 'Pembeli';
+          const isi = document.createElement('small');
+          isi.textContent = last.teks || ('📎 ' + (last.fileNama || 'file'));
+          item.append(judul, isi);
+          item.addEventListener('click', () => {
+            adm.current = t.id;
+            adm.sig = '';
+            $('admForm').hidden = false;
+            admRefresh();
+          });
+          listEl.appendChild(item);
+        });
+
+        // Percakapan terpilih, digambar ulang hanya jika ada perubahan
+        const t = adm.current && data.threads[adm.current];
+        const sig = t ? t.msgs.map((m) => m.cid + (m.keputusan || '')).join('|') : '';
+        if (sig !== adm.sig) { adm.sig = sig; renderThread(t); }
+        $('admInfo').textContent = threads.length + ' pembeli';
+      }
+
+      function startAdmin() {
+        buyerEl.app.hidden = true;
+        const wrap = document.createElement('div');
+        wrap.className = 'adm';
+        wrap.innerHTML =
+          '<div class="adm-head"><span>Panel Admin · ' + CONFIG.adminName + '</span><span id="admInfo"></span></div>' +
+          '<div class="adm-list" id="admList"></div>' +
+          '<div class="adm-chat" id="admChat" role="log" aria-live="polite"></div>' +
+          '<form class="adm-form" id="admForm" hidden><input id="admInput" type="text" maxlength="1000" placeholder="Balas pembeli..." autocomplete="off"><button type="submit">Kirim</button></form>';
+        document.body.appendChild(wrap);
+        $('admForm').addEventListener('submit', (e) => {
+          e.preventDefault();
+          const input = $('admInput');
+          const teks = input.value.trim();
+          if (!teks || !adm.current) return;
+          input.value = '';
+          simpanPesan(adm.current, { cid: makeId(), arah: 'admin', teks, waktu: new Date().toISOString() });
+          adm.sig = '';
+          admRefresh();
+        });
+        // Browser meminta satu klik sebelum suara boleh diputar
+        document.addEventListener('click', () => {
+          try {
+            adm.audio = adm.audio || new (window.AudioContext || window.webkitAudioContext)();
+            adm.audio.resume();
+          } catch (err) { /* tidak apa-apa */ }
+        }, { once: true });
+        admRefresh();
+        setInterval(admRefresh, 1200);
+      }
+
       function startBuyer() {
         buyer.id = readLocal('kujr_buyer_id') || makeId();
         saveLocal('kujr_buyer_id', buyer.id);
@@ -1443,6 +1619,8 @@
         trackScroll(buyerEl.chat);
         addBubble(buyerEl.chat, 'in', { text: CONFIG.welcomeMessage });
 
+        syncPembeli();
+        setInterval(syncPembeli, 1500);
         if (fromLink) sendOrder(fromLink); // daftar data langsung terkirim sebagai pesan pertama
 
         if (CONFIG.notifyUrl) {
@@ -1543,7 +1721,7 @@
       window.addEventListener('resize', syncViewport);
       window.addEventListener('focusin', () => setTimeout(syncViewport, 150));
 
-      startBuyer();
+      if (ADMIN_MODE) startAdmin(); else startBuyer();
       syncViewport();
     })();
   </script>
