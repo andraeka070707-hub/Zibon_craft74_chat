@@ -623,8 +623,8 @@
         notifyUrl: '',                  // URL Web App Apps Script (/exec). Kosongkan = mode demo tanpa server
         danaNumber: '0085739257269',    // nomor DANA toko
         qrUrl: 'gambar/dana-qr.png',    // gambar QR DANA, disimpan di folder gambar/
-        produk: 'KUJR ARJUNA (locomotive listrik dan inspeksi)',
-        hargaDefault: 25000,            // dipakai jika halaman dibuka tanpa data pesanan
+        hargaDefault: 25000,            // harga addon. Dipakai jika halaman dibuka tanpa pesan dari index.html
+        cekDenganTotal: true,           // true: bukti minimal = total tagihan (contoh Rp25.123). false: minimal = harga addon (Rp25.000)
         batasJam: 7,                    // bukti berlaku sampai berapa jam setelah transaksi (dan harus tanggal hari ini)
         mediafireUrl: 'https://www.mediafire.com/file/e3jxsdht5dyqk8s/ZIBON_CRAFT74+KUJR+ARJUNA+ADDON.mcaddon.zip/file',
         ocrLang: 'eng',                 // bahasa pembaca gambar. 'eng+ind' juga bisa (unduhannya lebih besar)
@@ -741,11 +741,6 @@
 
       function rupiah(n) {
         return 'Rp' + Number(n).toLocaleString('id-ID');
-      }
-
-      function toInt(v) {
-        const n = parseInt(String(v || '').replace(/\D/g, ''), 10);
-        return Number.isFinite(n) && n > 0 ? n : 0;
       }
 
       // "Rp25.094" atau "1.500" -> 25094 atau 1500. Desimal ",00" di belakang diabaikan.
@@ -895,6 +890,24 @@
         else bubble.insertBefore(body, bubble.firstChild);
       }
 
+      // Teks dengan format WhatsApp (*tebal*). Memakai DOM, bukan innerHTML, agar aman.
+      function fillText(node, teks) {
+        String(teks).split('\n').forEach((baris, i) => {
+          if (i > 0) node.appendChild(document.createElement('br'));
+          baris.split(/(\*[^*\n]+\*)/).forEach((bagian) => {
+            if (!bagian) return;
+            if (/^\*[^*\n]+\*$/.test(bagian)) {
+              const tebal = document.createElement('strong');
+              tebal.textContent = bagian.slice(1, -1);
+              node.appendChild(tebal);
+            } else {
+              node.appendChild(document.createTextNode(bagian));
+            }
+          });
+        });
+        return node;
+      }
+
       // Menambah satu balon. side = 'in' (admin/sistem) atau 'out' (pembeli).
       // o.link = { url, label } menampilkan tombol unduhan di dalam balon.
       function addBubble(box, side, o) {
@@ -918,7 +931,7 @@
         if (o.text) {
           const text = document.createElement('div');
           text.className = 'msg-text';
-          text.textContent = o.text;
+          fillText(text, o.text);
           bubble.appendChild(text);
         }
 
@@ -1014,40 +1027,38 @@
       /* =====================================================================
          DATA PESANAN
          ===================================================================== */
-      // Teks daftar data yang dikirim otomatis. Format ini juga dibaca oleh dasbor admin.
-      function buildBillText(o) {
-        return [
-          '*Nama:* ' + o.nama,
-          '*Gmail:* ' + (o.gmail || '-'),
-          '*Produk:* ' + o.produk,
-          '*Harga:* ' + rupiah(o.harga),
-          '*No. Invoice:* ' + o.invoice,
-          '*Total transfer:* ' + rupiah(o.total),
-        ].join('\n');
+      // Mengambil isi baris "*Label:* isi" dari teks pesan
+      function fieldOf(teks, label) {
+        const m = new RegExp('\\*' + label + ':\\*[ \\t]*([^\\n]*)', 'i').exec(teks);
+        return m ? m[1].trim() : '';
       }
 
-      // Membaca data pesanan dari alamat (?nama=...&invoice=...). Alamat dibersihkan setelahnya,
-      // supaya pesan tidak terkirim dua kali saat halaman dimuat ulang.
+      // Teks pesan dari index.html -> data pesanan. Teksnya tetap disalin apa adanya ke chat.
+      function parseOrder(teks) {
+        const bukti = parseProof(teks) || { total: 0, invoice: '' };
+        return {
+          text: teks.trim(),
+          nama: fieldOf(teks, 'Nama').slice(0, 40),
+          gmail: fieldOf(teks, 'Gmail').slice(0, 80),
+          harga: toAmount(fieldOf(teks, 'Harga')) || 0,
+          total: bukti.total,
+          invoice: bukti.invoice,
+        };
+      }
+
+      // Membaca teks tagihan dari alamat (?pesan=...) yang dikirim tombol Konfirmasi di index.html.
+      // Alamat dibersihkan setelahnya, supaya pesan tidak terkirim dua kali saat halaman dimuat ulang.
       function readOrderFromUrl() {
         const p = new URLSearchParams(window.location.search);
-        if (!p.has('invoice') && !p.has('total')) return null;
+        const teks = p.get('pesan');
+        if (!teks) return null;
 
-        const harga = toInt(p.get('harga')) || CONFIG.hargaDefault;
-        const order = {
-          nama: (p.get('nama') || '').trim().slice(0, 40),
-          gmail: (p.get('gmail') || '').trim().slice(0, 80),
-          produk: (p.get('produk') || CONFIG.produk).slice(0, 120),
-          harga,
-          invoice: (p.get('invoice') || '').replace(/[^A-Za-z0-9-]/g, '').slice(0, 40),
-          total: toInt(p.get('total')) || harga,
-        };
-
-        ['nama', 'gmail', 'produk', 'harga', 'invoice', 'total'].forEach((k) => p.delete(k));
+        p.delete('pesan');
         const rest = p.toString();
         try {
           history.replaceState(null, '', window.location.pathname + (rest ? '?' + rest : '') + window.location.hash);
         } catch (err) { /* alamat tidak bisa diubah: lewati */ }
-        return order;
+        return parseOrder(teks);
       }
 
       function loadSavedOrder() {
@@ -1058,21 +1069,20 @@
         saveLocal('kujr_order', JSON.stringify(o));
       }
 
-      // Mengirim daftar data sebagai pesan pertama, lalu menampilkan kartu QR DANA
+      // Teks pesan dari index.html langsung disalin sebagai pesan pertama pembeli, lalu kartu QR DANA muncul
       function sendOrder(o) {
-        const text = buildBillText(o);
         const cid = makeId();
         buyer.seen.add(cid);
-        const bubble = addBubble(buyerEl.chat, 'out', { cid, text, tick: 'pending' });
+        const bubble = addBubble(buyerEl.chat, 'out', { cid, text: o.text, tick: 'pending' });
 
         if (CONFIG.notifyUrl) {
           postJSON({
             action: 'buyerMessage',
             buyerId: buyer.id,
             cid,
-            nama: o.nama,
-            email: o.gmail,
-            teks: text,
+            nama: o.nama || buyerEl.name.value.trim(),
+            email: o.gmail || buyerEl.email.value.trim(),
+            teks: o.text,
           }).catch(() => failBubble(bubble));
         } else {
           setTick(bubble, 'sent');
@@ -1142,6 +1152,14 @@
 
       const dayOf = (ts) => DAY_FORMAT.format(new Date(ts)); // tanggal Asia/Jakarta: "YYYY-MM-DD"
 
+      // Nominal minimal bukti: total tagihan (cekDenganTotal: true) atau harga addon saja (false)
+      function minimalBayar(order) {
+        const total = (order && order.total) || 0;
+        const harga = (order && order.harga) || 0;
+        if (CONFIG.cekDenganTotal) return total || harga || CONFIG.hargaDefault;
+        return harga || total || CONFIG.hargaDefault;
+      }
+
       // Urutan pengecekan: tanggal & batas waktu dulu, baru nominal.
       function verdictOf(info, order) {
         if (!info.ts || !info.amount) return 'tidakTerbaca';
@@ -1151,8 +1169,7 @@
         if (dayOf(info.ts) !== dayOf(now)) return 'kadaluarsa';    // bukan hari ini
         if (now - info.ts > CONFIG.batasJam * HOUR) return 'kadaluarsa';
 
-        const minimal = (order && order.total) || CONFIG.hargaDefault;
-        if (info.amount < minimal) return 'kurang';
+        if (info.amount < minimalBayar(order)) return 'kurang';
         return 'ok';
       }
 
