@@ -566,6 +566,66 @@
     .bubble.dana-bubble { border-top-left-radius: 8px; }
     .bubble.dana-bubble::before { display: none; }
   </style>
+  <style>
+    /* ---------- Kode catatan DANA (di bawah QR) ---------- */
+    .catatan-box {
+      margin-top: 10px;
+      padding: 8px 6px 10px;
+      border: 2px dashed #075e54;
+      border-radius: 10px;
+      background: #ffffff;
+      text-align: center;
+    }
+
+    .catatan-judul {
+      font-size: 12.5px;
+      font-weight: 800;
+      letter-spacing: 0.4px;
+      color: #d93025;
+    }
+
+    .catatan-kode {
+      margin: 6px 0 8px;
+      font-size: clamp(28px, 8.4vw, 36px);
+      font-weight: 800;
+      line-height: 1.15;
+      color: #075e54;
+      overflow-wrap: anywhere;
+      user-select: text;
+      -webkit-user-select: text;
+    }
+
+    .catatan-salin {
+      display: block;
+      width: 100%;
+      padding: 14px 10px;
+      border: 0;
+      border-radius: 10px;
+      background: #075e54;
+      color: #ffffff;
+      font-family: inherit;
+      font-size: 17px;
+      font-weight: 700;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .catatan-salin:active { transform: scale(0.98); }
+    .catatan-salin.sudah { background: #128c7e; }
+
+    .catatan-peringatan {
+      margin-top: 8px;
+      font-size: 12.5px;
+      font-weight: 600;
+      line-height: 1.35;
+      color: #d93025;
+    }
+
+    /* Di HP, balon kartu DANA dibuat selebar chat agar kode catatan muat dalam satu baris */
+    @media (max-width: 767px) {
+      .bubble.dana-bubble { max-width: 100%; }
+    }
+  </style>
 </head>
 <body>
 
@@ -1804,7 +1864,368 @@ function pasangPencegahRingan() {
       window.addEventListener('resize', syncViewport);
       window.addEventListener('focusin', () => setTimeout(syncViewport, 150));
 
+      /* =====================================================================
+         CHAT BERTAHAN 2 HARI (tambahan). Kunci chat = "chat_" + Nama + "_" + Gmail.
+         Disimpan di localStorage browser ini: isi chat (apa adanya), jam dibuat (sekali),
+         jam hilang = jam dibuat + 48 jam. Lewat dari itu, ruang chat dihapus.
+         ===================================================================== */
+      const CHAT_AWALAN = 'chat_';
+      const CHAT_HIDUP_MS = 48 * HOUR;        // 2 hari persis
+      const CHAT_TAMPILKAN_SAPAAN = true;     // true: sapaan lama (welcomeMessage) tetap tampil di atas chat, seperti sistem asli. false: layar kunci baru tanpa sapaan
+      const PENUTUP_QR_BISA_DIUNDUH = false;  // true: penutup QR transparan bisa diunduh lewat klik kanan/tekan lama (ini mengubah aturan klik kanan sistem asli)
+      const CHAT_SIMPAN_BERKAS = true;        // true: foto & file yang dikirim ikut tersimpan 2 hari di browser ini (IndexedDB). false: tidak disimpan
+      let chatToken = 0;                      // penanda render terakhir (render lama yang terlambat dibatalkan)
+      let urlBerkasAktif = [];                // URL sementara foto/file yang sedang tampil
+
+      let chatSedangDirender = false;         // true saat layar dibangun ulang dari penyimpanan (tidak dicatat ulang)
+      let chatKunciTampil = null;             // kunci yang sedang tampil di layar
+      let chatBelumBerkunci = [];             // pesan yang sudah tampil sebelum Nama & Gmail lengkap
+
+      function kunciChatAktif() {
+        const nama = buyerEl.name.value.trim();
+        const gmail = buyerEl.email.value.trim();
+        return nama && gmail ? CHAT_AWALAN + nama + '_' + gmail : '';
+      }
+
+      function hapusLocal(key) {
+        try { localStorage.removeItem(key); } catch (err) { /* lewati */ }
+      }
+
+      // Membaca satu ruang chat. Jika sudah lewat jam hilang, ruang dihapus dan dianggap tidak ada.
+      function bacaRuangChat(kunci) {
+        const raw = readLocal(kunci);
+        if (!raw) return null;
+        let ruang = null;
+        try { ruang = JSON.parse(raw); } catch (err) { ruang = null; }
+        if (!ruang || !Array.isArray(ruang.isiChat) || !(ruang.jamHilang > 0) || Date.now() >= ruang.jamHilang) {
+          hapusLocal(kunci);
+          return null;
+        }
+        return ruang;
+      }
+
+      function simpanRuangChat(kunci, ruang) {
+        try {
+          localStorage.setItem(kunci, JSON.stringify(ruang));
+          return true;
+        } catch (err) {
+          return false;
+        }
+      }
+
+      // Membuang semua ruang chat yang sudah lewat 48 jam
+      function buangChatKedaluarsa() {
+        const daftar = [];
+        try {
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && k.indexOf(CHAT_AWALAN) === 0) daftar.push(k);
+          }
+        } catch (err) { return; }
+        daftar.forEach((k) => { bacaRuangChat(k); });
+      }
+
+      // Ruang chat untuk kunci ini. Jika belum ada, dibuat sekarang (jam dibuat dicatat sekali).
+      function pastikanRuangChat(kunci) {
+        const ada = bacaRuangChat(kunci);
+        if (ada) return ada;
+        const now = Date.now();
+        const ruang = { isiChat: chatBelumBerkunci, jamDibuat: now, jamHilang: now + CHAT_HIDUP_MS };
+        chatBelumBerkunci = [];
+        ruang.isiChat.filter((p) => p.jenis === 'berkas').forEach((p) => tandaiBerkas(p.cid, kunci));
+        simpanRuangChat(kunci, ruang);
+        return ruang;
+      }
+
+      // Mencatat satu pesan teks pembeli atau satu kartu tagihan ke ruang chat kunci aktif
+      function catatChat(item) {
+        if (chatSedangDirender) return;
+        const entri = Object.assign({ waktu: Date.now() }, item);
+        const kunci = kunciChatAktif();
+        if (!kunci) {
+          chatBelumBerkunci.push(entri); // belum ada kunci: ikut tersimpan begitu kunci terbentuk
+          return;
+        }
+        const ruang = pastikanRuangChat(kunci);
+        if (entri.cid && ruang.isiChat.some((p) => p.cid === entri.cid)) return;
+        ruang.isiChat.push(entri);
+        if (!simpanRuangChat(kunci, ruang)) {
+          showToast('Penyimpanan browser penuh atau diblokir. Chat ini tidak tersimpan.', 4000);
+        }
+      }
+
+      // Membangun ulang layar chat. Tanpa kunci lengkap, hanya pesan sementara yang tampil.
+      // Jika ada foto/file tersimpan, datanya diambil dulu dari IndexedDB, baru layar dibangun.
+      function tampilkanChat(kunci) {
+        let daftar = chatBelumBerkunci;
+        if (kunci) {
+          if (chatBelumBerkunci.length) pastikanRuangChat(kunci); // pesan sementara ikut tersimpan ke kunci ini
+          const ruang = bacaRuangChat(kunci);
+          daftar = ruang ? ruang.isiChat : [];
+        }
+        chatKunciTampil = kunci;
+        const token = ++chatToken;
+        const idBerkas = CHAT_SIMPAN_BERKAS ? daftar.filter((p) => p.jenis === 'berkas').map((p) => p.cid) : [];
+        if (!idBerkas.length) {
+          bangunLayarChat(daftar, new Map());
+          return Promise.resolve();
+        }
+        return ambilBerkasBanyak(idBerkas)
+          .catch(() => new Map())
+          .then((peta) => { if (token === chatToken) bangunLayarChat(daftar, peta); });
+      }
+
+      function bangunLayarChat(daftar, peta) {
+        const urlLama = urlBerkasAktif;
+        urlBerkasAktif = [];
+        chatSedangDirender = true;
+        try {
+          buyerEl.chat.replaceChildren();
+          const pill = document.createElement('div');
+          pill.className = 'date-pill';
+          pill.textContent = 'Hari ini';
+          buyerEl.chat.appendChild(pill);
+          if (CHAT_TAMPILKAN_SAPAAN) addBubble(buyerEl.chat, 'in', { text: CONFIG.welcomeMessage });
+          daftar.forEach((item) => tampilItemChat(item, peta));
+        } finally {
+          chatSedangDirender = false;
+          urlLama.forEach((u) => URL.revokeObjectURL(u));
+        }
+      }
+
+      function tampilItemChat(item, peta) {
+        if (item.jenis === 'kartu') {
+          addDanaCard(buyerEl.chat, { total: item.total, invoice: item.invoice });
+        } else if (item.jenis === 'berkas') {
+          const rec = peta.get(item.cid);
+          const file = { name: item.nama, sizeKB: item.ukuranKB };
+          if (rec && rec.blob) {
+            const url = URL.createObjectURL(rec.blob);
+            urlBerkasAktif.push(url);
+            if (item.gambar) file.previewUrl = url;
+            else file.link = url; // kartu file bisa diketuk untuk membuka/mengunduh lagi
+          } else {
+            file.sub = 'Tidak tersedia lagi';
+          }
+          addBubble(buyerEl.chat, 'out', { cid: item.cid, file, time: item.waktu, tick: 'sent' });
+        } else {
+          addBubble(buyerEl.chat, 'out', { cid: item.cid, text: item.teks, time: item.waktu, tick: 'sent' });
+        }
+      }
+
+      /* ---------- Foto & file tersimpan (IndexedDB browser ini, bukan server) ---------- */
+      const BERKAS_DB_NAMA = 'chatBerkas';
+      const BERKAS_TOKO = 'berkas';
+      let berkasDbJanji = null;
+
+      function bukaBerkasDb() {
+        if (!berkasDbJanji) {
+          berkasDbJanji = new Promise((resolve, reject) => {
+            if (!window.indexedDB) { reject(new Error('indexedDB tidak tersedia')); return; }
+            const req = indexedDB.open(BERKAS_DB_NAMA, 1);
+            req.onupgradeneeded = () => { req.result.createObjectStore(BERKAS_TOKO, { keyPath: 'id' }); };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error || new Error('buka gagal'));
+            req.onblocked = () => reject(new Error('diblokir'));
+          }).catch((err) => { berkasDbJanji = null; throw err; });
+        }
+        return berkasDbJanji;
+      }
+
+      // Satu transaksi di toko berkas. kerja(toko) boleh mengembalikan IDBRequest, boleh juga tidak.
+      function txBerkas(mode, kerja) {
+        return bukaBerkasDb().then((db) => new Promise((resolve, reject) => {
+          const tx = db.transaction(BERKAS_TOKO, mode);
+          const hasil = kerja(tx.objectStore(BERKAS_TOKO));
+          tx.oncomplete = () => resolve(hasil && 'result' in hasil ? hasil.result : undefined);
+          tx.onerror = () => reject(tx.error || new Error('transaksi gagal'));
+          tx.onabort = () => reject(tx.error || new Error('transaksi dibatalkan'));
+        }));
+      }
+
+      // Mengambil foto/file tertentu saja (tidak memuat semua data)
+      function ambilBerkasBanyak(ids) {
+        if (!ids.length) return Promise.resolve(new Map());
+        return bukaBerkasDb().then((db) => new Promise((resolve, reject) => {
+          const tx = db.transaction(BERKAS_TOKO, 'readonly');
+          const toko = tx.objectStore(BERKAS_TOKO);
+          const permintaan = ids.map((id) => toko.get(id));
+          tx.oncomplete = () => resolve(new Map(permintaan.filter((r) => r.result).map((r) => [r.result.id, r.result])));
+          tx.onerror = () => reject(tx.error || new Error('baca gagal'));
+          tx.onabort = () => reject(tx.error || new Error('baca dibatalkan'));
+        }));
+      }
+
+      function simpanBerkas(rec) {
+        return txBerkas('readwrite', (toko) => toko.put(rec));
+      }
+
+      function hapusBerkas(id) {
+        return txBerkas('readwrite', (toko) => toko.delete(id)).catch(() => {});
+      }
+
+      // Pesan yang tampil sebelum Nama & Gmail lengkap ikut pindah ke kunci yang baru terbentuk
+      function tandaiBerkas(id, kunci) {
+        return bukaBerkasDb().then((db) => new Promise((resolve, reject) => {
+          const tx = db.transaction(BERKAS_TOKO, 'readwrite');
+          const toko = tx.objectStore(BERKAS_TOKO);
+          const req = toko.get(id);
+          req.onsuccess = () => { if (req.result) toko.put(Object.assign({}, req.result, { kunci })); };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error);
+        })).catch(() => {});
+      }
+
+      // Membuang foto/file yang kuncinya sudah hilang (kedaluwarsa), atau yang belum pernah dikunci dan sudah 48 jam
+      function bersihkanBerkas() {
+        return txBerkas('readonly', (toko) => toko.getAll()).then((semua) => {
+          const sekarang = Date.now();
+          const buang = semua
+            .filter((r) => (r.kunci ? readLocal(r.kunci) === '' : r.dibuat + CHAT_HIDUP_MS <= sekarang))
+            .map((r) => r.id);
+          if (buang.length) return txBerkas('readwrite', (toko) => { buang.forEach((id) => toko.delete(id)); });
+        }).catch(() => {});
+      }
+
+      // Menghapus satu item chat (dipakai jika unggahan gagal)
+      function hapusItemChat(cid, kunciAwal) {
+        chatBelumBerkunci = chatBelumBerkunci.filter((p) => p.cid !== cid);
+        const daftarKunci = [kunciAwal, kunciChatAktif()].filter((k, i, arr) => k && arr.indexOf(k) === i);
+        daftarKunci.forEach((k) => {
+          const ruang = bacaRuangChat(k);
+          if (ruang && ruang.isiChat.some((p) => p.cid === cid)) {
+            ruang.isiChat = ruang.isiChat.filter((p) => p.cid !== cid);
+            simpanRuangChat(k, ruang);
+          }
+        });
+      }
+
+      // Unggahan foto/file pembeli: balonnya tetap dibuat seperti biasa, lalu datanya ikut disimpan
+      const handleUploadAsli = handleUpload;
+      handleUpload = function (file) {
+        const sebelum = buyerEl.chat.lastElementChild;
+        const hasil = handleUploadAsli(file);
+        const baris = buyerEl.chat.lastElementChild;
+        const balon = baris && baris !== sebelum ? baris.querySelector('.bubble.out.file') : null;
+        if (CHAT_SIMPAN_BERKAS && balon && balon.dataset.cid) {
+          const cid = balon.dataset.cid;
+          const kunciAwal = kunciChatAktif();
+          const gambar = isImageFile(file);
+          catatChat({ jenis: 'berkas', cid, nama: file.name, ukuranKB: file.size / 1024, gambar });
+          simpanBerkas({ id: cid, kunci: kunciAwal, dibuat: Date.now(), nama: file.name, gambar, ukuranKB: file.size / 1024, blob: file })
+            .catch(() => {
+              hapusItemChat(cid, kunciAwal);
+              showToast('Penyimpanan browser penuh. File ini tidak tersimpan di chat.', 4000);
+            });
+          Promise.resolve(hasil).then(() => {
+            if (balon.dataset.tick === 'failed') { hapusItemChat(cid, kunciAwal); hapusBerkas(cid); }
+          }, () => {});
+        }
+        return hasil;
+      };
+
+      // Kotak Nama atau Gmail diubah: chat langsung berganti ke kunci yang baru
+      function gantiKunciChat() {
+        const kunci = kunciChatAktif();
+        if (kunci === chatKunciTampil) return;
+        tampilkanChat(kunci);
+      }
+
+      // Balon teks pembeli (pesan yang diketik atau daftar data dari index.html) ikut dicatat
+      const addBubbleAsli = addBubble;
+      addBubble = function (box, side, o) {
+        const balon = addBubbleAsli(box, side, o);
+        if (box === buyerEl.chat && side === 'out' && o && o.text) {
+          catatChat({ jenis: 'teks', cid: o.cid || '', teks: o.text });
+        }
+        return balon;
+      };
+
+      // Kartu QR DANA: di bawah QR ditambah KODE CATATAN (nomor invoice), tagihannya ikut dicatat
+      const addDanaCardAsli = addDanaCard;
+      addDanaCard = function (box, proof) {
+        addDanaCardAsli(box, proof);
+        const baris = box.lastElementChild;
+        const pelindung = baris ? baris.querySelector('.qr-shield') : null;
+        if (pelindung && proof && proof.invoice) pelindung.after(buatKotakCatatan(proof.invoice));
+        keepInView(box, baris);
+        if (box === buyerEl.chat && proof) {
+          catatChat({ jenis: 'kartu', total: proof.total || 0, invoice: proof.invoice || '' });
+        }
+      };
+
+      function buatKotakCatatan(kode) {
+        const kotak = document.createElement('div');
+        kotak.className = 'catatan-box';
+
+        const judul = document.createElement('div');
+        judul.className = 'catatan-judul';
+        judul.textContent = 'KODE CATATAN - WAJIB DIISI';
+
+        const isi = document.createElement('div');
+        isi.className = 'catatan-kode';
+        isi.textContent = kode;
+
+        const tombol = document.createElement('button');
+        tombol.type = 'button';
+        tombol.className = 'catatan-salin';
+        tombol.textContent = '📋 SALIN KODE';
+        tombol.addEventListener('click', async () => {
+          if (!(await salinTeks(kode))) {
+            showToast('Gagal menyalin otomatis. Tahan kodenya lalu pilih Salin.', 3500);
+            return;
+          }
+          tombol.textContent = '✅ TERSALIN!';
+          tombol.classList.add('sudah');
+        });
+
+        const peringatan = document.createElement('div');
+        peringatan.className = 'catatan-peringatan';
+        peringatan.textContent = 'Tempel di kolom Catatan DANA, kalau kosong pembayaran nggak ke-detek';
+
+        kotak.append(judul, isi, tombol, peringatan);
+        return kotak;
+      }
+
+      async function salinTeks(teks) {
+        try {
+          await navigator.clipboard.writeText(teks);
+          return true;
+        } catch (err) {
+          try {
+            const area = document.createElement('textarea');
+            area.value = teks;
+            area.setAttribute('readonly', '');
+            area.style.position = 'fixed';
+            area.style.opacity = '0';
+            document.body.appendChild(area);
+            area.select();
+            const ok = document.execCommand('copy');
+            area.remove();
+            return ok;
+          } catch (err2) {
+            return false;
+          }
+        }
+      }
+
+      // Kotak Nama dan Gmail di atas: mengganti ruang chat secara langsung
+      buyerEl.name.addEventListener('input', gantiKunciChat);
+      buyerEl.email.addEventListener('input', gantiKunciChat);
+
+      // Penutup QR transparan: default mati (sama seperti sistem asli). Ubah flag PENUTUP_QR_BISA_DIUNDUH ke true jika ingin bisa diunduh.
+      if (PENUTUP_QR_BISA_DIUNDUH) {
+        window.addEventListener('contextmenu', (e) => {
+          if (e.target && e.target.closest && e.target.closest('.qr-cover')) e.stopPropagation();
+        }, true);
+      }
+
       startBuyer();
+      // Chat bertahan: buang kunci yang sudah lewat 48 jam, lalu tampilkan chat sesuai Nama & Gmail
+      buangChatKedaluarsa();
+      if (CHAT_SIMPAN_BERKAS) bersihkanBerkas();
+      tampilkanChat(kunciChatAktif());
       syncViewport();
     })();
   </script>
