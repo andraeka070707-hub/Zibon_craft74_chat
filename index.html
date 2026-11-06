@@ -1764,7 +1764,12 @@ function pasangPencegahRingan() {
         trackScroll(buyerEl.chat);
         addBubble(buyerEl.chat, 'in', { text: CONFIG.welcomeMessage });
 
-        if (fromLink) sendOrder(fromLink); // daftar data langsung terkirim sebagai pesan pertama
+        // Data pesanan otomatis (pesan + kartu QR + kotak catatan) hanya sekali per ruang chat 2 hari.
+        // Setelah ruang chat 48 jam habis, penandanya ikut hilang dan data otomatis boleh dikirim lagi.
+        if (fromLink && !autoSudahDikirim()) {
+          sendOrder(fromLink); // daftar data langsung terkirim sebagai pesan pertama
+          tandaiAutoDikirim();
+        }
 
         if (CONFIG.notifyUrl) {
           setStatus('menghubungkan...');
@@ -1935,6 +1940,22 @@ function pasangPencegahRingan() {
         ruang.isiChat.filter((p) => p.jenis === 'berkas').forEach((p) => tandaiBerkas(p.cid, kunci));
         simpanRuangChat(kunci, ruang);
         return ruang;
+      }
+
+      // Penanda data otomatis untuk ruang chat ini. Disimpan di ruang chat itu sendiri,
+      // jadi ikut hilang saat ruang chat 48 jam habis.
+      function autoSudahDikirim() {
+        const kunci = kunciChatAktif();
+        const ruang = kunci ? bacaRuangChat(kunci) : null;
+        return !!(ruang && ruang.autoDikirim === true);
+      }
+
+      function tandaiAutoDikirim() {
+        const kunci = kunciChatAktif();
+        if (!kunci) return;
+        const ruang = pastikanRuangChat(kunci);
+        ruang.autoDikirim = true;
+        simpanRuangChat(kunci, ruang);
       }
 
       // Mencatat satu pesan teks pembeli atau satu kartu tagihan ke ruang chat kunci aktif
