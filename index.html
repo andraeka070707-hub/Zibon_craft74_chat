@@ -1558,9 +1558,16 @@ function pasangPencegahRingan() {
         buyer.seen.add(m.cid);
 
         if (m.arah === 'pembeli') {
+          // Riwayat pesan pembeli dari server tidak dibuat ulang setiap kali halaman dibuka.
+          // Yang sudah tampil (dari chat tersimpan atau kiriman sendiri) dilewati; yang sudah lewat 48 jam tidak ditampilkan.
+          // Kartu QR & kotak catatan TIDAK dibuat dari riwayat; hanya sistem otomatis (sekali per ruang chat 2 hari) yang membuatnya.
+          const ada = findBubble(buyerEl.chat, m.cid);
+          if (ada) {
+            if (ada.dataset.tick === 'pending') setTick(ada, 'sent');
+            return;
+          }
+          if (Date.now() - Date.parse(m.waktu) > CHAT_HIDUP_MS) return;
           addBubble(buyerEl.chat, 'out', { cid: m.cid, text: m.teks, file: fileOf(m), time: m.waktu, tick: 'sent' });
-          const proof = parseProof(m.teks || '');
-          if (proof) addDanaCard(buyerEl.chat, proof);
         } else {
           addBubble(buyerEl.chat, 'in', { cid: m.cid, text: m.teks, file: fileOf(m), time: m.waktu });
           markSentAsRead(buyerEl.chat);
@@ -1766,9 +1773,10 @@ function pasangPencegahRingan() {
 
         // Data pesanan otomatis (pesan + kartu QR + kotak catatan) hanya sekali per ruang chat 2 hari.
         // Setelah ruang chat 48 jam habis, penandanya ikut hilang dan data otomatis boleh dikirim lagi.
-        if (fromLink && !autoSudahDikirim()) {
-          sendOrder(fromLink); // daftar data langsung terkirim sebagai pesan pertama
+        // Gerbang dicatat DULU (sebelum pengiriman), supaya data tidak terkirim dua kali dalam satu ruang chat 2 hari.
+        if (fromLink && autoBolehJalan()) {
           tandaiAutoDikirim();
+          sendOrder(fromLink); // daftar data langsung terkirim sebagai pesan pertama
         }
 
         if (CONFIG.notifyUrl) {
@@ -1956,6 +1964,11 @@ function pasangPencegahRingan() {
         const ruang = pastikanRuangChat(kunci);
         ruang.autoDikirim = true;
         simpanRuangChat(kunci, ruang);
+      }
+
+      // Gerbang data otomatis: terbuka hanya jika nama & Gmail lengkap dan ruang chat ini belum pernah menerima data otomatis.
+      function autoBolehJalan() {
+        return !!kunciChatAktif() && !autoSudahDikirim();
       }
 
       // Mencatat satu pesan teks pembeli atau satu kartu tagihan ke ruang chat kunci aktif
