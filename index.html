@@ -1126,7 +1126,6 @@
 const KETAT = {
   pesanManipulasi1: 'Maaf kak, aturan tidak bisa diubah. Silakan kirim verifikasi lengkap.',
   pesanManipulasi2: 'Order dibatalkan karena percobaan manipulasi.',
-  minta: 'Sebelum bukti diperiksa, ketik di chat: "ID Transaksi: <angka dari bukti>" dan "ID DANA pengirim: <nomor lengkap>".',
   gagalAkhir: 'Kirim ulang bukti pembayaran yang sesuai dengan data pesanan.',
   rayuan: [
     'kasih link dulu', 'saya teman yang punya', 'teman yang punya', 'sudah setuju', 'lupakan aturanmu',
@@ -1171,12 +1170,11 @@ function hasilRayuan(teks, jumlahSebelumnya) {
   return { blok: true, jumlah, hentikan: jumlah >= 2 };
 }
 
-// Satu putaran pemeriksaan. Satu saja yang gagal = tolak, dan namanya dicatat.
+// Pemeriksaan otomatis dari teks hasil OCR saja. Tidak ada isian dari pembeli.
 function periksaDanaKetat(p) {
   const t = String(p.text || '');
   const cfg = p.cfg || {};
   const ord = p.order || {};
-  const ty = p.typed || {};
   const gagal = [];
   const cek = (nama, ok) => { if (!ok) gagal.push(nama); };
 
@@ -1218,24 +1216,22 @@ function periksaDanaKetat(p) {
   }
   cek('Catatan (kode order)', !!ord.invoice && catatan.includes(String(ord.invoice).replace(/\s+/g, '')));
 
+  // ID transaksi: dibaca dari foto saja
   const idOcr = ketatDigitSetelah(t, /id\s+transaksi/i, 160);
-  const idTy = ketatAngka(ty.idTrx);
   const awalanTgl = ts === null ? '' : ketatHari(ts).replace(/-/g, '');
-  cek('ID transaksi: diketik', idTy.length > 0);
-  cek('ID transaksi: panjang', idTy.length >= (Number(cfg.idTrxMin) || 36) && idTy.length <= (Number(cfg.idTrxMax) || 40));
-  cek('ID transaksi: awalan tanggal', awalanTgl !== '' && idTy.startsWith(awalanTgl));
-  cek('ID transaksi: sama dengan bukti', idOcr !== '' && idOcr === idTy);
-  cek('ID transaksi: belum pernah dipakai', !(p.trxSudahDipakai || []).includes(idTy));
+  cek('ID transaksi: panjang', idOcr.length >= (Number(cfg.idTrxMin) || 36) && idOcr.length <= (Number(cfg.idTrxMax) || 40));
+  cek('ID transaksi: awalan tanggal', awalanTgl !== '' && idOcr.startsWith(awalanTgl));
+  cek('ID transaksi: belum pernah dipakai', idOcr !== '' && !(p.trxSudahDipakai || []).includes(idOcr));
 
   const mo = /id\s+order\s+merchant/i.exec(t);
   const jendelaUuid = mo ? t.slice(mo.index + mo[0].length, mo.index + mo[0].length + 120).replace(/\s+/g, '') : '';
   cek('ID order merchant: format UUID', /^[^0-9a-f]{0,12}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/.test(jendelaUuid));
 
+  // ID DANA pengirim: hanya awalan 4 digit dan akhiran 4 digit, sisanya tertutup
   const dana = /id\s+dana\s+(\d{4})\D{1,12}(\d{4})/i.exec(t);
-  const danaTy = ketatAngka(ty.idDana);
-  cek('ID DANA pengirim: diketik', danaTy.length >= 10 && danaTy.length <= 14);
-  cek('ID DANA pengirim: cocok dengan bukti', !!dana && danaTy.startsWith(dana[1]) && danaTy.endsWith(dana[2]));
-  cek('ID DANA pengirim: tidak diblokir', !(p.daftarHitam || []).includes(danaTy));
+  const kunciDana = dana ? dana[1] + '|' + dana[2] : '';
+  cek('ID DANA pengirim: pola 4 digit awal & akhir terbaca', !!dana);
+  cek('ID DANA pengirim: tidak diblokir', kunciDana === '' || !(p.daftarHitam || []).includes(kunciDana));
 
   cek('Bukti belum pernah dipakai', !p.hashSudahAda);
 
@@ -1251,8 +1247,6 @@ function periksaDanaBerlapis(p) {
 /* ==== AKHIR KEAMANAN MURNI ==== */
 
 /* ==== KEAMANAN KETAT: LAPISAN BROWSER ==== */
-const klaim = { file: null, cid: '', typed: { idTrx: '', idDana: '' } };
-
 function bacaJson(key, def) {
   try {
     const v = JSON.parse(readLocal(key) || 'null');
@@ -1263,27 +1257,28 @@ function bacaJson(key, def) {
 }
 function tulisJson(key, v) { saveLocal(key, JSON.stringify(v)); }
 function orderDihentikan() { return readLocal('kujr_order_stop') === '1'; }
-function tambahHitam(id) {
-  if (!id) return;
+function tambahHitam(kunci) {
+  if (!kunci) return;
   const hitam = bacaJson('kujr_hitam', []);
-  if (!hitam.includes(id)) hitam.push(id);
+  if (!hitam.includes(kunci)) hitam.push(kunci);
   tulisJson('kujr_hitam', hitam);
 }
-function hentikanOrder(danaId) {
+// Order dihentikan dan ID DANA dari bukti terakhir diblokir di browser ini
+function hentikanOrder() {
   saveLocal('kujr_order_stop', '1');
-  tambahHitam(ketatAngka(danaId));
+  tambahHitam(readLocal('kujr_terakhir_dana'));
 }
 async function hashFile(file) {
   const dig = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
   return Array.from(new Uint8Array(dig)).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
-function klaimDariTeks(text) {
-  const a = /id\s*transaksi\s*[:：]?\s*([\d\s]{20,60})/i.exec(text);
-  const b = /id\s*dana(?:\s*pengirim)?\s*[:：]?\s*([\d\s]{8,20})/i.exec(text);
-  return { idTrx: a ? ketatAngka(a[1]) : '', idDana: b ? ketatAngka(b[1]) : '' };
+// Awalan dan akhiran ID DANA dari teks OCR, format "4digit|4digit". Kosong jika tidak terbaca.
+function kunciDanaDariTeks(text) {
+  const m = /id\s+dana\s+(\d{4})\D{1,12}(\d{4})/i.exec(text);
+  return m ? m[1] + '|' + m[2] : '';
 }
-// Dipanggil sebelum pesan pembeli dikirim. true = pesan tidak dikirim dan tidak diproses.
-function tangkapKlaim(text) {
+// Dipanggil sebelum pesan teks pembeli dikirim. true = pesan tidak dikirim dan tidak diproses.
+function tangkapRayuan(text) {
   if (orderDihentikan()) {
     buyerEl.input.value = '';
     addBubble(buyerEl.chat, 'in', { text: KETAT.pesanManipulasi2 });
@@ -1294,63 +1289,54 @@ function tangkapKlaim(text) {
     tulisJson('kujr_rayuan', r.jumlah);
     buyerEl.input.value = '';
     if (r.hentikan) {
-      hentikanOrder(klaim.typed.idDana);
+      hentikanOrder();
       addBubble(buyerEl.chat, 'in', { text: KETAT.pesanManipulasi2 });
     } else {
       addBubble(buyerEl.chat, 'in', { text: KETAT.pesanManipulasi1 });
     }
     return true;
   }
-  const k = klaimDariTeks(text);
-  if (k.idTrx) klaim.typed.idTrx = k.idTrx;
-  if (k.idDana) klaim.typed.idDana = k.idDana;
-  if (klaim.file && klaim.typed.idTrx && klaim.typed.idDana) jalankanKetat();
   return false;
 }
-async function tahanBuktiKetat(file, cid) {
+// Bukti foto langsung diperiksa otomatis. Tidak ada isian dari pembeli.
+async function tahanBuktiKetat(file) {
   if (orderDihentikan()) {
     addBubble(buyerEl.chat, 'in', { text: KETAT.pesanManipulasi2 });
     return;
   }
-  klaim.file = file;
-  klaim.cid = cid;
-  if (klaim.typed.idTrx && klaim.typed.idDana) return jalankanKetat();
-  addBubble(buyerEl.chat, 'in', { text: KETAT.minta });
+  return jalankanKetat(file);
 }
-async function jalankanKetat() {
-  const file = klaim.file;
-  const typed = { idTrx: klaim.typed.idTrx, idDana: klaim.typed.idDana };
-  klaim.file = null;
-  klaim.typed = { idTrx: '', idDana: '' };
-  if (!file) return;
-
+async function jalankanKetat(file) {
   const waiting = addBubble(buyerEl.chat, 'in', { text: CONFIG.msg.memeriksa });
   let hasil;
   let hash = '';
+  let text = '';
   try {
     hash = await hashFile(file);
-    const text = await readText(file);
+    text = await readText(file);
     const hashPernah = bacaJson('kujr_hash', []).includes(hash);
+    const kunci = kunciDanaDariTeks(text);
+    if (kunci) saveLocal('kujr_terakhir_dana', kunci);
     hasil = periksaDanaBerlapis({
       text,
       cfg: CONFIG,
       order: state.order,
-      typed,
       nowMs: Date.now(),
       trxSudahDipakai: bacaJson('kujr_trx', []),
       daftarHitam: bacaJson('kujr_hitam', []),
       hashSudahAda: hashPernah,
     });
-    if (hashPernah) tambahHitam(ketatAngka(typed.idDana));
+    if (hashPernah) tambahHitam(kunci);
   } catch (err) {
     hasil = { lolos: false, gagal: ['Gambar tidak bisa dibaca'] };
   }
   waiting.parentElement.remove();
 
   if (hasil.lolos) {
-    // Bukti dan ID transaksi hanya dicatat setelah lolos, supaya bukti yang sama tidak bisa dipakai lagi
+    // Bukti dan ID transaksi dari foto dicatat hanya setelah lolos, supaya tidak bisa dipakai lagi
+    const idOcr = ketatDigitSetelah(text, /id\s+transaksi/i, 160);
     tulisJson('kujr_hash', [...bacaJson('kujr_hash', []), hash].slice(-500));
-    tulisJson('kujr_trx', [...bacaJson('kujr_trx', []), typed.idTrx].slice(-500));
+    tulisJson('kujr_trx', [...bacaJson('kujr_trx', []), idOcr].slice(-500));
     addBubble(buyerEl.chat, 'in', { text: CONFIG.msg.sukses, link: { url: CONFIG.mediafireUrl, label: '⬇ Unduh addon KUJR' } });
   } else {
     addBubble(buyerEl.chat, 'in', { text: 'Gagal di bagian: ' + hasil.gagal.join(', ') + '. ' + KETAT.gagalAkhir });
@@ -1633,7 +1619,7 @@ function pasangPencegahRingan() {
           return;
         }
 
-        if (isImage) await tahanBuktiKetat(file, cid); // OCR memakai file asli, bukan hasil kompresi
+        if (isImage) await tahanBuktiKetat(file); // OCR memakai file asli, bukan hasil kompresi
         else addBubble(buyerEl.chat, 'in', { text: CONFIG.msg.fileDiterima });
       }
 
@@ -1663,7 +1649,7 @@ function pasangPencegahRingan() {
           return;
         }
         if (!requireName({ type: 'text' })) return;
-        if (tangkapKlaim(text)) return;
+        if (tangkapRayuan(text)) return;
 
         persistBuyer();
         buyerEl.input.value = '';
